@@ -10,7 +10,7 @@
 PM2="/home/eosio/.npm-global/bin/pm2"
 HYPERIONPATH="/opt/eosio/src/Hyperion-History-API"
 BLOCKSPAN="1000000"
-CHAINNAME="proton"
+CHAINNAME="libre"
 CHAINCONF="$HYPERIONPATH/chains/$CHAINNAME.config.json"
 PM2USER="eosio"
 PM2HOME="`eval echo ~$PM2USER`/.pm2/logs"
