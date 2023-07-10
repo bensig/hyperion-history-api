@@ -1,4 +1,4 @@
-import {FastifyInstance, RouteSchema} from "fastify";
+import {FastifyInstance, FastifySchema} from "fastify";
 import {getActionsHandler} from "./get_actions";
 import {addApiRoute, extendQueryStringSchema, extendResponseSchema, getRouteName} from "../../../helpers/functions";
 
@@ -6,17 +6,46 @@ export const getActionResponseSchema = {
     "@timestamp": {type: "string"},
     "timestamp": {type: "string"},
     "block_num": {type: "number"},
+    "block_id": {type: "string"},
     "trx_id": {type: "string"},
     "act": {
         type: 'object',
         properties: {
             "account": {type: "string"},
-            "name": {type: "string"}
+            "name": {type: "string"},
+            "authorization": {
+                type: "array",
+                items: {
+                    type: "object",
+                    properties: {
+                        "actor": {type: "string"},
+                        "permission": {type: "string"},
+                    }
+                }
+            }
         },
         additionalProperties: true
     },
-    "notified": {
-        type: "array", items: {type: "string"}
+    "receipts": {
+        type: "array",
+        items: {
+            type: "object",
+            properties: {
+                "receiver": {type: "string"},
+                "global_sequence": {type: "number"},
+                "recv_sequence": {type: "number"},
+                "auth_sequence": {
+                    type: "array",
+                    items: {
+                        type: "object",
+                        properties: {
+                            "account": {type: "string"},
+                            "sequence": {type: "number"},
+                        }
+                    }
+                }
+            }
+        }
     },
     "cpu_usage_us": {type: "number"},
     "net_usage_words": {type: "number"},
@@ -32,15 +61,15 @@ export const getActionResponseSchema = {
         }
     },
     "global_sequence": {type: "number"},
-    "receiver": {type: 'string'},
     "producer": {type: "string"},
     "parent": {type: "number"},
     "action_ordinal": {type: 'number'},
-    "creator_action_ordinal": {type: 'number'}
+    "creator_action_ordinal": {type: 'number'},
+    "signatures": {type: "array", items: {type: 'string'}}
 };
 
 export default function (fastify: FastifyInstance, opts: any, next) {
-    const schema: RouteSchema = {
+    const schema: FastifySchema = {
         description: 'get actions based on notified account. this endpoint also accepts generic filters based on indexed fields' +
             ' (e.g. act.authorization.actor=eosio or act.name=delegatebw), if included they will be combined with a AND operator',
         summary: 'get root actions',

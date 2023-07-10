@@ -1,9 +1,7 @@
 import {ConfigurationModule} from "../modules/config";
 
 const shards = 2;
-const replicas = 0;
 const refresh = "1s";
-let defaultLifecyclePolicy = "200G";
 
 export * from './index-lifecycle-policies';
 
@@ -15,12 +13,10 @@ const compression = "best_compression";
 const cm = new ConfigurationModule();
 const chain = cm.config.settings.chain;
 
-if (cm.config.settings.hot_warm_policy) {
-    defaultLifecyclePolicy = "hyperion-rollover";
-}
-
-if(cm.config.settings.custom_policy) {
-    defaultLifecyclePolicy = cm.config.settings.custom_policy;
+// update number of replicas if set to larger than 0
+let replicas = 0;
+if (cm.config.settings.es_replicas) {
+    replicas = cm.config.settings.es_replicas;
 }
 
 const defaultIndexSettings = {
@@ -34,10 +30,6 @@ const defaultIndexSettings = {
 
 const actionSettings = {
     index: {
-        lifecycle: {
-            "name": defaultLifecyclePolicy,
-            "rollover_alias": chain + "-action"
-        },
         codec: compression,
         refresh_interval: refresh,
         number_of_shards: shards * 2,
@@ -49,9 +41,24 @@ const actionSettings = {
     }
 };
 
+// actionSettings.index["lifecycle"] = {
+//     "name": defaultLifecyclePolicy,
+//     "rollover_alias": chain + "-action"
+// };
+
 if (cm.config.settings.hot_warm_policy) {
     actionSettings["routing"] = {"allocation": {"exclude": {"data": "warm"}}};
 }
+
+const transferProps = {
+    "properties": {
+        "from": {"type": "keyword"},
+        "to": {"type": "keyword"},
+        "amount": {"type": "float"},
+        "symbol": {"type": "keyword"},
+        "memo": {"type": "text"}
+    }
+};
 
 export const action = {
     order: 0,
@@ -72,6 +79,7 @@ export const action = {
             "act.name": {"type": "keyword"},
             "act.data": {"enabled": false},
             "block_num": {"type": "long"},
+            "block_id": {"type": "keyword"},
             "action_ordinal": {"type": "long"},
             "creator_action_ordinal": {"type": "long"},
             "cpu_usage_us": {"type": "integer"},
@@ -80,7 +88,6 @@ export const action = {
             "abi_sequence": {"type": "integer"},
             "trx_id": {"type": "keyword"},
             "producer": {"type": "keyword"},
-            "notified": {"type": "keyword"},
             "signatures": {"enabled": false},
             "inline_count": {"type": "short"},
             "max_inline": {"type": "short"},
@@ -118,15 +125,7 @@ export const action = {
             },
 
             // *::transfer
-            "@transfer": {
-                "properties": {
-                    "from": {"type": "keyword"},
-                    "to": {"type": "keyword"},
-                    "amount": {"type": "float"},
-                    "symbol": {"type": "keyword"},
-                    "memo": {"type": "text"}
-                }
-            },
+            "@transfer": transferProps,
 
             // eosio::unstaketorex
             "@unstaketorex": {
@@ -190,19 +189,22 @@ export const action = {
 };
 
 const deltaSettings = {
-    "index": {
-        "lifecycle": {
-            "name": defaultLifecyclePolicy,
-            "rollover_alias": chain + "-delta"
-        },
-        "codec": compression,
-        "number_of_shards": shards * 2,
-        "refresh_interval": refresh,
-        "number_of_replicas": replicas,
-        "sort.field": ["block_num", "scope", "primary_key"],
-        "sort.order": ["desc", "asc", "asc"]
+    index: {
+        codec: compression,
+        number_of_shards: shards * 2,
+        refresh_interval: refresh,
+        number_of_replicas: replicas,
+        sort: {
+            field: ["block_num", "scope", "primary_key"],
+            order: ["desc", "asc", "asc"]
+        }
     }
 };
+
+// deltaSettings.index["lifecycle"] = {
+//     "name": defaultLifecyclePolicy,
+//     "rollover_alias": chain + "-delta"
+// };
 
 if (cm.config.settings.hot_warm_policy) {
     deltaSettings["routing"] = {"allocation": {"exclude": {"data": "warm"}}};
@@ -216,6 +218,7 @@ export const delta = {
 
             // base fields
             "@timestamp": {"type": "date"},
+            "present": {"type": "byte"},
             "ds_error": {"type": "boolean"},
             "block_id": {"type": "keyword"},
             "block_num": {"type": "long"},
@@ -298,7 +301,7 @@ export const permissionLink = {
         "properties": {
             "block_num": {"type": "long"},
             "@timestamp": {"type": "date"},
-            "present": {"type": "boolean"},
+            "present": {"type": "byte"},
             "account": {"type": "keyword"},
             "code": {"type": "keyword"},
             "action": {"type": "keyword"},
@@ -313,7 +316,7 @@ export const permission = {
     "mappings": {
         "properties": {
             "block_num": {"type": "long"},
-            "present": {"type": "boolean"},
+            "present": {"type": "byte"},
             "owner": {"type": "keyword"},
             "name": {"type": "keyword"},
             "parent": {"type": "keyword"},
@@ -364,6 +367,26 @@ export const failedTransaction = {
             "block_num": {"type": "long"},
             "@timestamp": {"type": "date"},
             "status": {"type": "short"}
+        }
+    }
+};
+
+export const schedule = {
+    "index_patterns": [chain + "-schedule-*"],
+    "settings": {
+        ...defaultIndexSettings,
+        sort: {
+            field: "version",
+            order: "desc"
+        }
+    },
+    "mappings": {
+        "properties": {
+            "block_num": {"type": "long"},
+            "version": {"type": "long"},
+            "@timestamp": {"type": "date"},
+            "producers.name": {"type": "keyword"},
+            "producers.keys": {"type": "keyword"},
         }
     }
 };
@@ -437,7 +460,7 @@ export const tableProposals = {
     "mappings": {
         "properties": {
             "block_num": {"type": "long"},
-            "present": {"type": "boolean"},
+            "present": {"type": "byte"},
             "proposal_name": {"type": "keyword"},
             "requested_approvals": {"type": "object"},
             "provided_approvals": {"type": "object"},
@@ -461,7 +484,7 @@ export const tableAccounts = {
     "mappings": {
         "properties": {
             "block_num": {"type": "long"},
-            "present": {"type": "boolean"},
+            "present": {"type": "byte"},
             "code": {"type": "keyword"},
             "scope": {"type": "keyword"},
             "amount": {"type": "float"},
@@ -470,6 +493,7 @@ export const tableAccounts = {
     }
 };
 
+// noinspection JSUnusedGlobalSymbols
 export const tableDelBand = {
     "index_patterns": [chain + "-table-delband-*"],
     "settings": {

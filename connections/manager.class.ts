@@ -1,5 +1,5 @@
 import {ConfigurationModule} from "../modules/config";
-import {JsonRpc} from "eosjs/dist";
+import {JsonRpc} from "eosjs";
 import got from "got";
 import {Client} from '@elastic/elasticsearch'
 import {HyperionConnections} from "../interfaces/hyperionConnections";
@@ -9,6 +9,7 @@ import {StateHistorySocket} from "./state-history";
 import fetch from 'cross-fetch';
 import {exec} from "child_process";
 import {hLog} from "../helpers/common_functions";
+import {readFileSync} from "fs";
 
 export class ConnectionManager {
 
@@ -19,12 +20,15 @@ export class ConnectionManager {
     last_commit_hash: string;
     current_version: string;
 
-    private esIngestClients: Client[];
+    private readonly esIngestClients: Client[];
     private esIngestClient: Client;
 
     constructor(private cm: ConfigurationModule) {
         this.config = cm.config;
         this.conn = cm.connections;
+        if (!this.conn.amqp.protocol) {
+            this.conn.amqp.protocol = 'http';
+        }
         this.chain = this.config.settings.chain;
         this.esIngestClients = [];
         this.prepareESClient();
@@ -39,7 +43,8 @@ export class ConnectionManager {
     async purgeQueues() {
         hLog(`Purging all ${this.chain} queues!`);
         const apiUrl = `http://${this.conn.amqp.api}`;
-        const getAllQueuesFromVHost = apiUrl + `/api/queues/%2F${this.conn.amqp.vhost}`;
+        const vHost = encodeURIComponent(this.conn.amqp.vhost);
+        const getAllQueuesFromVHost = apiUrl + `/api/queues/${vHost}`;
         const opts = {
             username: this.conn.amqp.user,
             password: this.conn.amqp.pass
@@ -61,7 +66,7 @@ export class ConnectionManager {
                     const msg_count = parseInt(queue.messages);
                     if (msg_count > 0) {
                         try {
-                            await got.delete(apiUrl + `/api/queues/%2F${this.conn.amqp.vhost}/${queue.name}/contents`, opts);
+                            await got.delete(apiUrl + `/api/queues/${vHost}/${queue.name}/contents`, opts);
                             hLog(`${queue.messages} messages deleted on queue ${queue.name}`);
                         } catch (e) {
                             console.log(e.message);
@@ -75,21 +80,19 @@ export class ConnectionManager {
     }
 
     prepareESClient() {
-        let es_url;
         const _es = this.conn.elasticsearch;
         if (!_es.protocol) {
             _es.protocol = 'http';
         }
-        if (_es.user !== '') {
-            es_url = `${_es.protocol}://${_es.user}:${_es.pass}@${_es.host}`;
-        } else {
-            es_url = `${_es.protocol}://${_es.host}`
-        }
         this.esIngestClient = new Client({
-            node: es_url,
-            ssl: {
+            node: `${_es.protocol}://${_es.host}`,
+            auth: {
+                username: _es.user,
+                password: _es.pass
+            },
+            ssl: _es.protocol === 'https' ? {
                 rejectUnauthorized: false
-            }
+            } : undefined
         });
     }
 
@@ -105,19 +108,17 @@ export class ConnectionManager {
         if (_es.ingest_nodes) {
             if (_es.ingest_nodes.length > 0) {
                 for (const node of _es.ingest_nodes) {
-                    let es_url;
-                    if (_es.user !== '') {
-                        es_url = `${_es.protocol}://${_es.user}:${_es.pass}@${node}`;
-                    } else {
-                        es_url = `${_es.protocol}://${node}`
-                    }
-                    this.esIngestClients.push(new Client({
-                        node: es_url,
+                    this.esIngestClient = new Client({
+                        node: `${_es.protocol}://${_es.host}`,
+                        auth: {
+                            username: _es.user,
+                            password: _es.pass
+                        },
                         pingTimeout: 100,
-                        ssl: {
+                        ssl: _es.protocol === 'https' ? {
                             rejectUnauthorized: false
-                        }
-                    }));
+                        } : undefined
+                    });
                 }
             }
         }
@@ -140,7 +141,7 @@ export class ConnectionManager {
     }
 
     get shipClient(): StateHistorySocket {
-        return new StateHistorySocket(this.conn.chains[this.config.settings.chain]['ship'], this.config.settings.max_ws_payload_kb);
+        return new StateHistorySocket(this.conn.chains[this.config.settings.chain]['ship'], this.config.settings.max_ws_payload_mb);
     }
 
     get ampqUrl() {
@@ -149,8 +150,15 @@ export class ConnectionManager {
 
     calculateServerHash() {
         exec('git rev-parse HEAD', (err, stdout) => {
-            console.log('Last commit hash on this branch is:', stdout);
-            this.last_commit_hash = stdout.trim();
+            if (err) {
+                // hLog(`\n ${err.message}\n >>> Failed to check last commit hash. Version hash will be "custom"`);
+                hLog(`Failed to check last commit hash. Version hash will be "custom"`);
+                this.last_commit_hash = 'custom';
+            } else {
+                hLog('Last commit hash on this branch is:', stdout);
+                this.last_commit_hash = stdout.trim();
+            }
+            this.getHyperionVersion();
         });
     }
 
@@ -159,6 +167,9 @@ export class ConnectionManager {
     }
 
     getHyperionVersion() {
-        this.current_version = require('../package.json').version
+        this.current_version = require('../package.json').version;
+        if (this.last_commit_hash === 'custom') {
+            this.current_version = this.current_version + '-dirty';
+        }
     }
 }

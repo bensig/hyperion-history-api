@@ -1,4 +1,4 @@
-import {extendedActions, primaryTerms, terms} from "./definitions";
+import {primaryTerms, terms} from "./definitions";
 
 export function addSortedBy(query, queryBody, sort_direction) {
     if (query['sortedBy']) {
@@ -70,68 +70,119 @@ function addRangeQuery(queryStruct, prop, pkey, query) {
 
 export function applyTimeFilter(query, queryStruct) {
     if (query['after'] || query['before']) {
-        let _lte = "now";
-        let _gte = "0";
-        if (query['before']) {
-            _lte = query['before'];
-            if (!_lte.endsWith("Z")) {
-                _lte += "Z";
-            }
+
+        if (query['after']?.includes(' ')) {
+            query['after'] = query['after'].replace(' ', 'T');
         }
-        if (query['after']) {
-            _gte = query['after'];
-            if (!_gte.endsWith("Z")) {
-                _gte += "Z";
-            }
+
+        if (query['before']?.includes(' ')) {
+            query['before'] = query['before'].replace(' ', 'T');
         }
-        if (!queryStruct.bool['filter']) {
-            queryStruct.bool['filter'] = [];
-        }
-        queryStruct.bool['filter'].push({
-            range: {
-                "@timestamp": {
-                    "gte": _gte,
-                    "lte": _lte
+
+        if (query['after']?.includes('T') || query['before']?.includes('T')) {
+            let _lte = "now";
+            let _gte = "0";
+            if (query['before']) {
+                try {
+                    _lte = new Date(query['before']).toISOString();
+                } catch (e) {
+                    throw new Error(e.message + ' [before]');
                 }
             }
-        });
+            if (query['after']) {
+                try {
+                    _gte = new Date(query['after']).toISOString();
+                } catch (e) {
+                    throw new Error(e.message + ' [after]');
+                }
+            }
+            if (!queryStruct.bool['filter']) {
+                queryStruct.bool['filter'] = [];
+            }
+            queryStruct.bool['filter'].push({
+                range: {
+                    "@timestamp": {
+                        "gte": _gte,
+                        "lte": _lte
+                    }
+                }
+            });
+        } else {
+            // search by block number
+            const rangeObj = {
+                range: {
+                    block_num: {}
+                }
+            };
+            if (parseInt(query['after']) > 0) {
+                rangeObj.range.block_num['gte'] = query['after'];
+            }
+            if (parseInt(query['before']) > 0) {
+                rangeObj.range.block_num['lte'] = query['before'];
+            }
+            if (Object.keys(rangeObj.range.block_num).length > 0) {
+                if (!queryStruct.bool['filter']) {
+                    queryStruct.bool['filter'] = [];
+                }
+                queryStruct.bool['filter'].push(rangeObj);
+            }
+        }
     }
 }
 
-export function applyGenericFilters(query, queryStruct) {
+export function applyGenericFilters(query, queryStruct, allowedExtraParams: Set<string>) {
     for (const prop in query) {
         if (Object.prototype.hasOwnProperty.call(query, prop)) {
             const pair = prop.split(".");
             if (pair.length > 1 || primaryTerms.includes(pair[0])) {
                 let pkey;
-                if (pair.length > 1) {
-                    pkey = extendedActions.has(pair[0]) ? "@" + prop : prop;
+                if (pair.length > 1 && allowedExtraParams) {
+                    pkey = allowedExtraParams.has(pair[0]) ? "@" + prop : prop;
                 } else {
                     pkey = prop;
                 }
                 if (query[prop].indexOf("-") !== -1) {
                     addRangeQuery(queryStruct, prop, pkey, query);
                 } else {
-                    const _termQuery = {};
+                    const _qObj = {};
                     const parts = query[prop].split(",");
                     if (parts.length > 1) {
                         processMultiVars(queryStruct, parts, prop);
                     } else if (parts.length === 1) {
-                        const andParts = parts[0].split(" ");
-                        if (andParts.length > 1) {
-                            andParts.forEach(value => {
-                                const _q = {};
-                                console.log(value);
-                                _q[pkey] = value;
-                                queryStruct.bool.must.push({term: _q});
+
+                        // @transfer.memo special case
+                        if (pkey === '@transfer.memo') {
+                            _qObj[pkey] = {
+                                query: parts[0]
+                            };
+
+                            if (query.match_fuzziness) {
+                                _qObj[pkey].fuzziness = query.match_fuzziness;
+                            }
+
+                            if (query.match_operator) {
+                                _qObj[pkey].operator = query.match_operator;
+                            }
+
+                            queryStruct.bool.must.push({
+                                match: _qObj
                             });
                         } else {
-                            if (parts[0].startsWith("!")) {
-                                _termQuery[pkey] = parts[0].replace("!", "");
-                                queryStruct.bool.must_not.push({term: _termQuery});
+                            const andParts = parts[0].split(" ");
+                            if (andParts.length > 1) {
+                                andParts.forEach(value => {
+                                    const _q = {};
+                                    _q[pkey] = value;
+                                    queryStruct.bool.must.push({term: _q});
+                                });
                             } else {
-                                _termQuery[pkey] = parts[0];
-                                queryStruct.bool.must.push({term: _termQuery});
+                                if (parts[0].startsWith("!")) {
+                                    _qObj[pkey] = parts[0].replace("!", "");
+                                    queryStruct.bool.must_not.push({term: _qObj});
+                                } else {
+                                    _qObj[pkey] = parts[0];
+                                    queryStruct.bool.must.push({term: _qObj});
+                                }
                             }
                         }
                     }

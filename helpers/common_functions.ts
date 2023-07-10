@@ -29,14 +29,13 @@ function getLastResult(results: ApiResponse) {
 
 export async function getLastIndexedBlockByDelta(es_client: Client, chain: string) {
     const results: ApiResponse = await es_client.search({
-        index: chain + '-delta',
+        index: chain + '-delta-*',
         size: 1,
         body: {
             query: {bool: {filter: {match_all: {}}}},
             sort: [{block_num: {order: "desc"}}]
         }
     });
-    debugLog(results);
     return getLastResult(results);
 }
 
@@ -65,6 +64,18 @@ export async function getLastIndexedBlockWithTotalBlocks(es_client: Client, chai
     let lastBlock = getLastResult(results);
     let totalBlocks = results.body.hits.total.value || 1;
     return [lastBlock, totalBlocks];
+}
+
+export async function getFirstIndexedBlock(es_client: Client, chain: string): Promise<number> {
+    const results: ApiResponse = await es_client.search({
+        index: chain + '-block-*',
+        size: 1,
+        body: {
+            query: {bool: {filter: {match_all: {}}}},
+            sort: [{block_num: {order: "asc"}}]
+        }
+    });
+    return getLastResult(results);
 }
 
 
@@ -126,7 +137,20 @@ export function messageAllWorkers(cl, payload) {
     for (const c in cl.workers) {
         if (cl.workers.hasOwnProperty(c)) {
             const _w = cl.workers[c];
-            _w.send(payload);
+            if (_w) {
+                try {
+                    if (_w.isConnected()) {
+                        _w.send(payload);
+                    } else {
+                        hLog('Worker is not connected!');
+                    }
+                } catch (e) {
+                    hLog('Failed to message worker!');
+                    hLog(e);
+                }
+            } else {
+                hLog('Worker not found!');
+            }
         }
     }
 }
@@ -167,6 +191,33 @@ function getNested(path_array, jsonObj) {
     }
 }
 
+export function checkDeltaFilter(filter, _source) {
+    if (filter.field && filter.value) {
+        let fieldValue = getNested(filter.field.split("."), _source);
+        if (!fieldValue) {
+            const fArray = filter.field.split(".");
+            if (fArray[0].startsWith('@')) {
+                const tableName = fArray[0].replace('@', '');
+                if (_source.table === tableName) {
+                    fArray[0] = 'data';
+                    fieldValue = getNested(fArray, _source);
+                }
+            }
+        }
+        if (fieldValue) {
+            if (Array.isArray(fieldValue)) {
+                return fieldValue.indexOf(filter.value) !== -1;
+            } else {
+                return fieldValue === filter.value;
+            }
+        } else {
+            return !filter.value;
+        }
+    } else {
+        return false;
+    }
+}
+
 export function checkFilter(filter, _source) {
     if (filter.field && filter.value) {
         let fieldValue = getNested(filter.field.split("."), _source);
@@ -199,9 +250,13 @@ export function hLog(input: any, ...extra: any[]) {
     let role;
     if (process.env.worker_role) {
         const id = parseInt(process.env.worker_id);
-        role = `[${(id < 10 ? '0' : '') + id.toString()}_${process.env.worker_role}]`;
+        role = `[${process.pid} - ${(id < 10 ? '0' : '') + id.toString()}_${process.env.worker_role}]`;
     } else {
-        role = '[00_master]';
+        if (process.env.script && process.env.script === './api/server.js') {
+            role = `[${process.pid} - api]`;
+        } else {
+            role = `[${process.pid} - 00_master]`;
+        }
     }
     if (process.env.TRACE_LOGS === 'true') {
         const e = new Error();
@@ -219,4 +274,20 @@ export function debugLog(text: any, ...extra: any[]) {
     if (config.settings.debug) {
         hLog(text, ...extra);
     }
+}
+
+export async function sleep(ms): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+export async function waitUntilReady(executor: () => Promise<boolean>, attempts: number, interval: number, onError: () => void): Promise<void> {
+    let i = 0;
+    while (i < attempts) {
+        if (await executor()) {
+            return;
+        }
+        await sleep(interval);
+        i++;
+    }
+    onError();
 }

@@ -7,7 +7,7 @@ import {Message} from "amqplib";
 import {parseDSPEvent} from "../modules/custom/dsp-parser";
 import {join, resolve} from "path";
 import {existsSync, readdirSync, readFileSync} from "fs";
-import * as flatstr from 'flatstr';
+import flatstr from 'flatstr';
 import IORedis from "ioredis";
 
 const abi_remapping = {
@@ -19,6 +19,48 @@ interface CustomAbiDef {
     abi: string;
     startingBlock: number;
     endingBlock: number;
+}
+
+function cleanActionTrace(t: any) {
+    try {
+        if (t.return_value === '') {
+            delete t.return_value;
+        }
+        if (t.context_free === false) {
+            delete t.context_free;
+        }
+        if (t.elapsed === '0') {
+            delete t.elapsed;
+        }
+
+        // remove act_digest from grouped receipts since it was written to the action
+        if (t.receipts && t.receipts.length > 0) {
+            t.act_digest = t.receipts[0].act_digest;
+            for (let receipt of t.receipts) {
+                delete receipt.act_digest;
+            }
+        } else {
+            delete t.receipts;
+        }
+
+        delete t.console;
+        delete t.receiver;
+
+        // onblock action case
+        if (t.signatures && t.signatures.length === 0) {
+            delete t.signatures;
+        }
+
+        if (t.inline_count === 0) {
+            delete t.inline_count;
+        }
+
+        if (t.net_usage_words === 0) {
+            delete t.net_usage_words;
+        }
+    } catch (e) {
+        console.log(e);
+    }
 }
 
 export default class DSPoolWorker extends HyperionWorker {
@@ -44,6 +86,8 @@ export default class DSPoolWorker extends HyperionWorker {
 
     customAbiMap: Map<string, CustomAbiDef[]> = new Map();
     private noActionCounter = 0;
+
+    // tx caching layer
     private readonly ioRedisClient: IORedis.Redis;
     txCacheExpiration = 3600;
 
@@ -185,6 +229,7 @@ export default class DSPoolWorker extends HyperionWorker {
         }
     }
 
+    // noinspection JSUnusedGlobalSymbols
     async verifyLocalType(contract, type, block_num, field) {
         let _status;
         let resultType;
@@ -258,7 +303,7 @@ export default class DSPoolWorker extends HyperionWorker {
                 debugLog(`(abieos) ${_action.account}::${_action.name} @ ${block_num} >>> ${e.message}`);
             }
         }
-        return await self.deserializeActionAtBlock(_action, block_num);
+        return self.deserializeActionAtBlock(_action, block_num);
     }
 
     async getAbiFromHeadBlock(code) {
@@ -377,9 +422,9 @@ export default class DSPoolWorker extends HyperionWorker {
                         action.data,
                         this.txEnc,
                         this.txDec
-                    );
+                    ).data;
                 } catch (e) {
-                    debugLog(`(eosjs)  ${action.account}::${action.name} @ ${block_num} >>> ${e.message}`);
+                    debugLog(`(eosjs) ${action.account}::${action.name} @ ${block_num} >>> ${e.message}`);
                     return null;
                 }
             } else {
@@ -410,7 +455,7 @@ export default class DSPoolWorker extends HyperionWorker {
 
     async processTraces(transaction_trace, extra) {
         const {cpu_usage_us, net_usage_words} = transaction_trace;
-        const {block_num, producer, ts, inline_count, filtered, live, signatures} = extra;
+        const {block_num, block_id, producer, ts, inline_count, filtered, live, signatures} = extra;
 
         if (transaction_trace.status === 0) {
             let action_count = 0;
@@ -421,6 +466,7 @@ export default class DSPoolWorker extends HyperionWorker {
             const trx_data = {
                 trx_id,
                 block_num,
+                block_id,
                 producer,
                 cpu_usage_us,
                 net_usage_words,
@@ -442,7 +488,7 @@ export default class DSPoolWorker extends HyperionWorker {
             }
 
             for (const action_trace of action_traces) {
-                if (action_trace[0] === 'action_trace_v0') {
+                if (action_trace[0].startsWith('action_trace_')) {
                     const ds_status = await this.mLoader.parser.parseAction(this,
                         ts,
                         action_trace[1],
@@ -460,20 +506,12 @@ export default class DSPoolWorker extends HyperionWorker {
             }
 
             const _finalTraces = [];
+
             if (_processedTraces.length > 1) {
                 const act_digests = {};
 
                 // collect digests & receipts
                 for (const _trace of _processedTraces) {
-
-                    if (this.conf.settings.dsp_parser) {
-                        if (_trace.console !== '') {
-                            await parseDSPEvent(this, _trace);
-                        }
-                    } else {
-                        delete _trace.console;
-                    }
-
                     if (act_digests[_trace.receipt.act_digest]) {
                         act_digests[_trace.receipt.act_digest].push(_trace.receipt);
                     } else {
@@ -484,18 +522,17 @@ export default class DSPoolWorker extends HyperionWorker {
                 // Apply notified accounts to first trace instance
                 for (const _trace of _processedTraces) {
                     if (act_digests[_trace.receipt.act_digest]) {
-                        const notifiedSet = new Set();
+                        // const notifiedSet = new Set();
                         _trace['receipts'] = [];
                         for (const _receipt of act_digests[_trace.receipt.act_digest]) {
-                            notifiedSet.add(_receipt.receiver);
+                            // notifiedSet.add(_receipt.receiver);
                             _trace['code_sequence'] = _receipt['code_sequence'];
                             delete _receipt['code_sequence'];
                             _trace['abi_sequence'] = _receipt['abi_sequence'];
                             delete _receipt['abi_sequence'];
-                            delete _receipt['act_digest'];
                             _trace['receipts'].push(_receipt);
                         }
-                        _trace['notified'] = [...notifiedSet];
+                        // _trace['notified'] = [...notifiedSet];
                         delete act_digests[_trace.receipt.act_digest];
                         delete _trace['receipt'];
                         delete _trace['receiver'];
@@ -510,34 +547,25 @@ export default class DSPoolWorker extends HyperionWorker {
                 _trace['code_sequence'] = _trace['receipt'].code_sequence;
                 _trace['abi_sequence'] = _trace['receipt'].abi_sequence;
                 _trace['act_digest'] = _trace['receipt'].act_digest;
-                _trace['notified'] = [_trace['receipt'].receiver];
+
+                // notified array is not required since receipts.receiver can be indexed directly
+                // _trace['notified'] = [_trace['receipt'].receiver];
+
                 delete _trace['receipt']['code_sequence'];
                 delete _trace['receipt']['abi_sequence'];
-                delete _trace['receipt']['act_digest'];
                 _trace['receipts'] = [_trace['receipt']];
                 delete _trace['receipt'];
                 _finalTraces.push(_trace);
             }
 
             // Submit Actions after deduplication
-            // hLog(_finalTraces.length);
 
             const redisPayload = new Map<string, IORedis.ValueType>();
 
             for (const uniqueAction of _finalTraces) {
-
-                // let tref = process.hrtime.bigint();
-                // const buf2 = Buffer.from(JSON.stringify(uniqueAction));
-                // const t1 = Number(process.hrtime.bigint() - tref) / 1000;
-                //
-                // tref = process.hrtime.bigint();
-                // const payload = Buffer.from(flatstr(JSON.stringify(uniqueAction)));
-                // const t2 = Number(process.hrtime.bigint() - tref) / 1000;
-                // console.log(`flatstr improvement (uniqueAction): ${(((t1 / t2) * 100) - 100).toFixed(2)}% | size: ${payload.length}`);
-
+                cleanActionTrace(uniqueAction);
                 const payload = Buffer.from(flatstr(JSON.stringify(uniqueAction)));
-                redisPayload.set(uniqueAction.global_sequence, payload);
-
+                redisPayload.set(uniqueAction.global_sequence.toString(), payload);
                 this.actionDsCounter++;
                 this.pushToActionsQueue(payload, block_num);
                 if (live === 'true') {
@@ -548,10 +576,10 @@ export default class DSPoolWorker extends HyperionWorker {
             // save payload to redis
             if (this.ioRedisClient && !this.conf.api.disable_tx_cache) {
                 try {
-                    await this.ioRedisClient.hset(trx_data.trx_id, redisPayload);
-                    await this.ioRedisClient.expire(trx_data.trx_id, this.txCacheExpiration);
+                    await this.ioRedisClient.hset('trx_' + trx_data.trx_id, redisPayload);
+                    await this.ioRedisClient.expire('trx_' + trx_data.trx_id, this.txCacheExpiration);
                 } catch (e) {
-                    hLog(e.message);
+                    hLog(e);
                 }
             }
         }
@@ -566,7 +594,7 @@ export default class DSPoolWorker extends HyperionWorker {
                 headers: {block_num}
             });
             this.act_emit_idx++;
-            if (this.act_emit_idx > (this.conf.scaling.indexing_queues * this.conf.scaling.ad_idx_queues)) {
+            if (this.act_emit_idx > (this.conf.scaling.ad_idx_queues)) {
                 this.act_emit_idx = 1;
             }
         }
@@ -574,20 +602,24 @@ export default class DSPoolWorker extends HyperionWorker {
 
     pushToActionStreamingQueue(payload, uniqueAction) {
         if (this.allowStreaming && this.conf.features['streaming'].traces) {
-            const notifArray = new Set();
-            uniqueAction.act.authorization.forEach(auth => {
-                notifArray.add(auth.actor);
-            });
-            uniqueAction.notified.forEach(acc => {
-                notifArray.add(acc);
-            });
-            const headers = {
-                event: 'trace',
-                account: uniqueAction['act']['account'],
-                name: uniqueAction['act']['name'],
-                notified: [...notifArray].join(",")
-            };
-            this.ch.publish('', this.chain + ':stream', payload, {headers});
+            try {
+                const notifArray = new Set();
+                uniqueAction.act.authorization.forEach(auth => {
+                    notifArray.add(auth.actor);
+                });
+                uniqueAction.receipts.forEach(rec => {
+                    notifArray.add(rec.receiver);
+                });
+                const headers = {
+                    event: 'trace',
+                    account: uniqueAction['act']['account'],
+                    name: uniqueAction['act']['name'],
+                    notified: [...notifArray].join(",")
+                };
+                this.ch.publish('', this.chain + ':stream', payload, {headers});
+            } catch (e) {
+                hLog(e);
+            }
         }
     }
 
@@ -609,7 +641,7 @@ export default class DSPoolWorker extends HyperionWorker {
         if (!status) {
             debugLog('Contract not found on cache!');
         } else {
-            debugLog(`🗑️ Contract Successfully removed from cache!`);
+            debugLog(`🗑️ Contract successfully removed from cache!`);
         }
     }
 
